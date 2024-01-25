@@ -19,7 +19,9 @@ void* handle_conn(void *args) {
 
     // announce the message size
     int32_t msg_size_conv = htonl(msg_size);
+    puts("sending message size");
     ssize_t n = send(conn_fd, &msg_size_conv, sizeof(msg_size_conv), 0);
+    puts("sent message size");
     if (n <= 0 || (size_t)n < sizeof(msg_size_conv)) {
         perror("send");
         return NULL;
@@ -56,6 +58,14 @@ int start_server(uint16_t port, int msg_sz) {
         exit(-1);
     }
 
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0) {
+        perror("setsockopt");
+    }
+
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int)) < 0) {
+        perror("setsockopt");
+    }
+
     struct sockaddr_in addr = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
@@ -68,7 +78,7 @@ int start_server(uint16_t port, int msg_sz) {
         exit(-1);
     }
 
-    if (0 != listen(listen_fd, 0)) {
+    if (0 != listen(listen_fd, 10)) {
         perror("listen");
         exit(-1);
     }
@@ -81,7 +91,7 @@ int start_server(uint16_t port, int msg_sz) {
             perror("accept");
             exit(-1);
         }
-        // puts("accepted");
+        puts("accepted");
 
         pthread_t tid;
         int *conn_fd_arg = malloc(sizeof(int));

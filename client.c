@@ -6,17 +6,10 @@
 #include <netdb.h>
 #include <netinet/ip.h>
 #include <pthread.h>
-
-struct client_thread_args {
-    const char* address;
-    const char* port;
-
-    _Atomic bool should_measure;
-    _Atomic uint64_t num_ops;
-    _Atomic uint64_t runtime;
-};
+#include <semaphore.h>
 
 #define BUF_SIZE 1024
+// #define DEBUG_ONE_OP
 
 void one_operation(int conn_fd, int msg_size) {
     static __thread uint64_t buf[BUF_SIZE/8] = {0};
@@ -31,8 +24,10 @@ void one_operation(int conn_fd, int msg_size) {
         *(uint64_t*)(&buf[i]) = rng_state;
     }
 
+    #ifdef DEBUG_ONE_OP
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
+    #endif
 
     ssize_t n = send(conn_fd, buf, msg_size, 0);
     // n = send(conn_fd, buf, msg_size/2, 0);
@@ -41,23 +36,42 @@ void one_operation(int conn_fd, int msg_size) {
         perror("send");
         exit(-1);
     }
-    clock_gettime(CLOCK_MONOTONIC, &end);
 
+    #ifdef DEBUG_ONE_OP
+    clock_gettime(CLOCK_MONOTONIC, &end);
     if (rand() % 4096 == 0) {
         printf("send %ld\n", (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec);
     }
-
     clock_gettime(CLOCK_MONOTONIC, &start);
+    #endif
+
     n = recv(conn_fd, &buf, msg_size, MSG_WAITALL);
+
+    #ifdef DEBUG_ONE_OP
     clock_gettime(CLOCK_MONOTONIC, &end);
     if (rand() % 4096 == 0) {
         printf("recv %ld\n", (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec);
     }
+    #endif
+
     if (n < msg_size) {
         perror("recv");
         exit(-1);
     }
 }
+
+static const char* address;
+static const char* port;
+
+static sem_t started;
+static sem_t should_measure;
+static sem_t should_report;
+static sem_t reported;
+
+struct client_thread_args {
+    uint64_t num_ops;
+    uint64_t runtime;
+};
 
 void* start_client(void* args_in) {
     struct client_thread_args *args = args_in;
@@ -67,16 +81,16 @@ void* start_client(void* args_in) {
     hints.ai_socktype = SOCK_STREAM;
 
     struct addrinfo *ai;
-    int err = getaddrinfo(args->address, args->port, &hints, &ai);
+    int err = getaddrinfo(address, port, &hints, &ai);
     if (0 != err) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
         exit(-1);
     }
 
-    int conn_fd;
+    int conn_fd = -1;
 
     for (struct addrinfo *cur_ai = ai; cur_ai != NULL; cur_ai = cur_ai->ai_next) {
-        // XXX: this only tries the first addrinfo in the linked list
+        // XXX: this only tries the first addrinfo in the linked list.
         conn_fd = socket(cur_ai->ai_family, cur_ai->ai_socktype, cur_ai->ai_protocol);
         if (0 > conn_fd) {
             perror("socket");
@@ -89,17 +103,20 @@ void* start_client(void* args_in) {
         }
     }
     freeaddrinfo(ai);
+    // At this point, conn_fd is ready to send/recv.
 
-    // get clock resolution
+    if (conn_fd < 0) {
+        perror("conn_fd negative");
+    }
+
+    // Get clock resolution.
     struct timespec res;
     err = clock_getres(CLOCK_MONOTONIC, &res);
     if (err != 0) {
         perror("clock_getres");
         exit(-1);
     }
-    printf("Clock resolution %ld\n", res.tv_sec * 1000000000 + res.tv_nsec);
-
-    // at this point, conn_fd is ready to send/recv
+    printf("Clock resolution %ld ns\n", res.tv_sec * 1000000000 + res.tv_nsec);
 
     // get and print the message size
     int32_t msg_size;
@@ -110,9 +127,17 @@ void* start_client(void* args_in) {
     msg_size = ntohl(msg_size);
     printf("Message size: %d\n", msg_size);
 
-    // warmup by sending messages until notified that we should begin measuring
+    // Do one operation, then signal the thread that another thread has started.
+    // one_operation(conn_fd, msg_size);
+    sem_post(&started);
+    // FIXME: remove this
     for (;;) {
-        if (args->should_measure) {
+        nanosleep(&(struct timespec){.tv_sec = 10000, .tv_nsec = 0}, NULL);
+    }
+
+    // Warm up by sending messages until notified that we should begin measuring.
+    for (;;) {
+        if (sem_trywait(&should_measure) >= 0) {
             break;
         }
         one_operation(conn_fd, msg_size);
@@ -127,7 +152,7 @@ void* start_client(void* args_in) {
 
     args->num_ops = 0;
     for (;;) {
-        if (!args->should_measure) {
+        if (sem_trywait(&should_report) >= 0) {
             break;
         }
         one_operation(conn_fd, msg_size);
@@ -139,29 +164,78 @@ void* start_client(void* args_in) {
         exit(-1);
     }
     args->runtime = (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec;
+    sem_post(&reported);
 
-    // run forever now
+    // Run forever in case other threads are still measuring.
     for (;;) {
         one_operation(conn_fd, msg_size);
     }
     return NULL;
 }
 
-int main() {
-    struct client_thread_args args;
-    args.address = "127.0.0.1";
-    args.port = "12345";
-    args.should_measure = false;
+void bench(int N, int warmup_sec, int measure_sec) {
+    address = "127.0.0.1";
+    port = "12345";
+
+    sem_init(&started, 0, 0);
+    sem_init(&should_measure, 0, 0);
+    sem_init(&should_report, 0, 0);
+    sem_init(&reported, 0, 0);
+
     pthread_t tid;
-    pthread_create(&tid, NULL, &start_client, &args);
 
-    args.should_measure = true;
-    nanosleep(&(struct timespec){.tv_sec = 5, .tv_nsec = 0}, NULL);
-    args.should_measure = false;
+    struct client_thread_args args[N];
+    memset(args, 0, sizeof(args));
 
-    // FIXME: need to wait for data to actually be reported, but should do so in a more principled way.
-    nanosleep(&(struct timespec){.tv_sec = 1, .tv_nsec = 0}, NULL);
+    for (int i = 0; i < N; i++) {
+        pthread_create(&tid, NULL, &start_client, &args[i]);
+    }
 
-    printf("ops: %ld in %ld ns\n", args.num_ops, args.runtime);
-    printf("ops/sec: %ld\n", args.num_ops*1000000000/args.runtime);
+    // Wait for N threads to start running.
+    for (int i = 0; i < N; i++) {
+        sem_wait(&started);
+    }
+
+    puts("warming up");
+    // warmup
+    nanosleep(&(struct timespec){.tv_sec = warmup_sec, .tv_nsec = 0}, NULL);
+
+    // Signal N threads to start measuring.
+    for (int i = 0; i < N; i++) {
+        sem_post(&should_measure);
+    }
+
+    puts("measuring");
+    nanosleep(&(struct timespec){.tv_sec = measure_sec, .tv_nsec = 0}, NULL);
+
+    // Signal N threads to stop measuring.
+    for (int i = 0; i < N; i++) {
+        sem_post(&should_report);
+    }
+
+    // Wait for N threads to report.
+    for (int i = 0; i < N; i++) {
+        sem_wait(&reported);
+    }
+
+    uint64_t num_ops = 0, runtime = 0;
+    // now aggregate the measurements
+    for (int i = 0; i < N; i++) {
+        num_ops += args[i].num_ops;
+        runtime += args[i].runtime;
+    }
+
+    printf("%ld ops/sec across %d threads", (num_ops * 1000000000 / runtime), N);
+
+    // The spawned threads have a pointer to sem_t's on this thread's stack, so
+    // should never return from this function so long as those threads are running.
+    exit(0);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        puts("must provide num_threads as first argument");
+        exit(-1);
+    }
+    bench(strtol(argv[1], NULL, 10), 5, 10);
 }
