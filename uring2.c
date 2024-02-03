@@ -1,8 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
 #include <sys/socket.h>
 #include <netinet/ip.h>
+#include <liburing.h>
+#include <err.h>
 
 #include <pthread.h>
 
@@ -15,7 +18,8 @@ void* handle_conn(void *args) {
     int conn_fd = *(int*)args;
     free(args);
 
-    char buf[BUF_SIZE];
+    char send_buf[BUF_SIZE];
+    char recv_buf[BUF_SIZE];
 
     // announce the message size
     int32_t msg_size_conv = htonl(msg_size);
@@ -28,26 +32,66 @@ void* handle_conn(void *args) {
     }
 
     // receive the 2 byte initial value from the client.
-    n = recv(conn_fd, buf, 2, MSG_WAITALL);
-    if (n < 2) {
+    n = recv(conn_fd, recv_buf, 2, MSG_WAITALL);
+    if (n <= 0 || n < 2) {
+        perror("recv");
+        return NULL;
+    }
+
+    // make uring
+    struct io_uring ring;
+    io_uring_queue_init(2, &ring, 0);
+    // XXX: 2 entries should be enough since we'll only queue at most a send+recv every
+    // time.
+
+    // receive the first message from the client
+    n = recv(conn_fd, send_buf, msg_size, MSG_WAITALL);
+    if (n < msg_size) {
         perror("recv");
         return NULL;
     }
 
     // echo loop
     for (;;) {
-        n = recv(conn_fd, buf, msg_size, MSG_WAITALL);
-        if (n < msg_size) {
-            perror("recv");
-            return NULL;
+        int e;
+        struct io_uring_sqe *sqe;
+        struct io_uring_cqe *cqe;
+
+        // enqueue `n = send(conn_fd, buf, msg_size, 0);`
+        sqe = io_uring_get_sqe(&ring);
+        if (sqe == NULL) {
+            err(-1, "io_uring_get_sqe: full sq\n");
+        }
+        io_uring_prep_send(sqe, conn_fd, send_buf, msg_size, 0);
+        // io_uring_sqe_set_flags(sqe, IOSQE_IO_LINK); // XXX: could make use of this to avoid two buffers
+
+        // enqueue `n = recv(conn_fd, buf, msg_size, MSG_WAITALL);`
+        sqe = io_uring_get_sqe(&ring);
+        if (sqe == NULL) {
+            err(-1, "io_uring_get_sqe: full sq\n");
+        }
+        io_uring_prep_recv(sqe, conn_fd, recv_buf, msg_size, MSG_WAITALL);
+
+        e = io_uring_submit(&ring);
+        if (err < 0) {
+            err(-1, "io_uring_wait_cqe: %d\n", -e);
         }
 
-        // send back the same bytes
-        n = send(conn_fd, buf, msg_size, 0);
-        if (n < msg_size) {
-            perror("send");
-            return NULL;
+        e = io_uring_wait_cqes(&ring, &cqe, 2, NULL, NULL);
+        unsigned head;
+        io_uring_for_each_cqe(&ring, head, cqe) {
+            // printf("cqe: %d\n", cqe->res);
+            n = cqe->res;
+            if (n < msg_size) {
+                perror("recv or send");
+                return NULL;
+            }
         }
+        io_uring_cq_advance(&ring, 2);
+        // `send` and `recv` both done at this point
+
+        // send the received bytes next time
+        memcpy(send_buf, recv_buf, msg_size);
     }
 }
 
@@ -108,5 +152,6 @@ int start_server(uint16_t port, int msg_sz) {
 }
 
 int main() {
+    puts("thread per client connection, io_uring per thread/conn");
     start_server(12345, 64);
 }

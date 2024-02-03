@@ -7,6 +7,7 @@
 #include <netinet/ip.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <err.h>
 
 #define BUF_SIZE 1024
 // #define DEBUG_ONE_OP
@@ -73,6 +74,16 @@ struct client_thread_args {
     uint64_t runtime;
 };
 
+void print_clock_res() {
+    // Get clock resolution.
+    struct timespec res;
+    int e = clock_getres(CLOCK_MONOTONIC, &res);
+    if (e != 0) {
+        err(-1, "clock_getres");
+    }
+    printf("Clock resolution: %ld ns\n", res.tv_sec * 1000000000 + res.tv_nsec);
+}
+
 void* start_client(void* args_in) {
     struct client_thread_args *args = args_in;
     struct addrinfo hints;
@@ -103,20 +114,13 @@ void* start_client(void* args_in) {
         }
     }
     freeaddrinfo(ai);
-    // At this point, conn_fd is ready to send/recv.
+    // XXX: At this point, conn_fd is ready to send; should only recv after the first
+    // send to avoid a half-connected socket caused by SYN cookies.
 
-    if (conn_fd < 0) {
-        perror("conn_fd negative");
-    }
+    // print_clock_res();
 
-    // Get clock resolution.
-    struct timespec res;
-    err = clock_getres(CLOCK_MONOTONIC, &res);
-    if (err != 0) {
-        perror("clock_getres");
-        exit(-1);
-    }
-    printf("Clock resolution: %ld ns\n", res.tv_sec * 1000000000 + res.tv_nsec);
+    // send "Hi", a 2 byte value.
+    send(conn_fd, "Hi", 4, 0);
 
     // get and print the message size
     int32_t msg_size;
@@ -125,7 +129,7 @@ void* start_client(void* args_in) {
         exit(-1);
     }
     msg_size = ntohl(msg_size);
-    printf("Message size: %d\n", msg_size);
+    // printf("Message size: %d\n", msg_size);
 
     // Do one operation, then signal the thread that another thread has started.
     // one_operation(conn_fd, msg_size);
@@ -170,7 +174,6 @@ void* start_client(void* args_in) {
 }
 
 void bench(int N, int warmup_sec, int measure_sec) {
-    address = "127.0.0.1";
     port = "12345";
 
     sem_init(&started, 0, 0);
@@ -215,14 +218,16 @@ void bench(int N, int warmup_sec, int measure_sec) {
         sem_wait(&reported);
     }
 
-    uint64_t num_ops = 0, runtime = 0;
     // now aggregate the measurements
+    uint64_t num_ops = 0;
+    uint64_t throughput = 0;
     for (int i = 0; i < N; i++) {
         num_ops += args[i].num_ops;
-        runtime += args[i].runtime;
+        throughput += ((args[i].num_ops*1000000000) + (args[i].runtime/2)) / args[i].runtime;
     }
 
-    printf("%ld ops/sec across %d threads\n", (num_ops * 1000000000 / runtime), N);
+    printf("%ld total ops\n", num_ops);
+    printf("%ld ops/sec across %d threads\n", throughput, N);
 
     // The spawned threads have a pointer to sem_t's on this thread's stack, so
     // should never return from this function so long as those threads are running.
@@ -230,9 +235,10 @@ void bench(int N, int warmup_sec, int measure_sec) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        puts("must provide num_threads as first argument");
+    if (argc < 3) {
+        puts("must provide num_threads as first argument, and server address as second argument");
         exit(-1);
     }
-    bench(strtol(argv[1], NULL, 10), 2, 3);
+    address = argv[2];
+    bench(strtol(argv[1], NULL, 10), 5, 15);
 }

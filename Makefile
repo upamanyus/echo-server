@@ -1,16 +1,25 @@
 CC=gcc
+CCFLAGS=-pthread -Wall -O2
 
-.PHONY: all
-all: multiclient simple client
+.PHONY: all clean
+all: bin/multiclient bin/simple bin/client bin/uring bin/uring2 bin/sem_trywait_scalability
+clean:
+	rm bin/multiclient bin/simple bin/client bin/uring bin/uring2 bin/sem_trywait_scalability
 
-multiclient: multiclient.c dsem.c
-	$(CC) -g -Wall $< -Lhiredis -l:libhiredis.a -o $@
+bin/multiclient: multiclient.c dsem.c
+	$(CC) $(CCFLAGS) $^ -Lhiredis -l:libhiredis.a -o $@
 
-simple: simple.c
-	$(CC) -Wall $< -o $@
+bin/simple: simple.c
+	$(CC) $(CCFLAGS) $^ -o $@
 
-client: client.c
-	$(CC) -Wall $< -o $@
+bin/client: client.c
+	$(CC) $(CCFLAGS) $^ -o $@
 
-uring: uring.c
-	$(CC) -Wall $< -o $@ -luring
+bin/uring: uring.c
+	$(CC) $(CCFLAGS) $^ -o $@ -luring
+
+bin/uring2: uring2.c
+	$(CC) $(CCFLAGS) $^ -o $@ -luring
+
+bin/sem_trywait_scalability: sem_trywait_scalability.c
+	$(CC) $(CCFLAGS) $^ -o $@

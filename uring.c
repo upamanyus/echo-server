@@ -29,6 +29,13 @@ void* handle_conn(void *args) {
         return NULL;
     }
 
+    // receive the 2 byte initial value from the client.
+    n = recv(conn_fd, buf, 2, MSG_WAITALL);
+    if (n < 2) {
+        perror("recv");
+        return NULL;
+    }
+
     // make uring
     struct io_uring ring;
     io_uring_queue_init(2, &ring, 0);
@@ -51,7 +58,7 @@ void* handle_conn(void *args) {
 
         e = io_uring_submit(&ring);
         if (err < 0) {
-            err(-1, "io_uring_wait_cqe: %d\n", -e);
+            err(-1, "io_uring_submit: %d\n", -e);
         }
 
         e = io_uring_wait_cqe(&ring, &cqe);
@@ -62,7 +69,7 @@ void* handle_conn(void *args) {
         n = cqe->res;
         io_uring_cqe_seen(&ring, cqe);
 
-        if (n <= 0 || n < msg_size) {
+        if (n < msg_size) {
             perror("recv");
             return NULL;
         }
@@ -76,7 +83,7 @@ void* handle_conn(void *args) {
 
         e = io_uring_submit(&ring);
         if (err < 0) {
-            err(-1, "io_uring_wait_cqe: %d\n", -e);
+            err(-1, "io_uring_submit: %d\n", -e);
         }
 
         e = io_uring_wait_cqe(&ring, &cqe);
@@ -88,7 +95,7 @@ void* handle_conn(void *args) {
         io_uring_cqe_seen(&ring, cqe);
 
         // send back the same bytes
-        if (n <= 0 || n < msg_size) {
+        if (n < msg_size) {
             perror("send");
             return NULL;
         }
@@ -129,7 +136,7 @@ int start_server(uint16_t port, int msg_sz) {
         exit(-1);
     }
 
-    if (0 != listen(listen_fd, 10)) {
+    if (0 != listen(listen_fd, 1024)) {
         perror("listen");
         exit(-1);
     }
