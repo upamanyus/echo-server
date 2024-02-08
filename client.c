@@ -84,7 +84,7 @@ void print_clock_res() {
     printf("Clock resolution: %ld ns\n", res.tv_sec * 1000000000 + res.tv_nsec);
 }
 
-void* start_client(void* args_in) {
+void* client(void* args_in) {
     struct client_thread_args *args = args_in;
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
@@ -120,7 +120,7 @@ void* start_client(void* args_in) {
     // print_clock_res();
 
     // send "Hi", a 2 byte value.
-    send(conn_fd, "Hi", 4, 0);
+    send(conn_fd, "Hi", 2, 0);
 
     // get and print the message size
     int32_t msg_size;
@@ -132,7 +132,7 @@ void* start_client(void* args_in) {
     // printf("Message size: %d\n", msg_size);
 
     // Do one operation, then signal the thread that another thread has started.
-    // one_operation(conn_fd, msg_size);
+    one_operation(conn_fd, msg_size);
     sem_post(&started);
 
     // Warm up by sending messages until notified that we should begin measuring.
@@ -187,7 +187,7 @@ void bench(int N, int warmup_sec, int measure_sec) {
     memset(args, 0, sizeof(args));
 
     for (int i = 0; i < N; i++) {
-        pthread_create(&tid, NULL, &start_client, &args[i]);
+        pthread_create(&tid, NULL, &client, &args[i]);
     }
 
     // Wait for N threads to start running.
@@ -240,5 +240,5 @@ int main(int argc, char **argv) {
         exit(-1);
     }
     address = argv[2];
-    bench(strtol(argv[1], NULL, 10), 5, 15);
+    bench(strtol(argv[1], NULL, 10), 2, 2);
 }
