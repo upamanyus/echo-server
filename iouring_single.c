@@ -69,7 +69,7 @@ typedef struct {
 
     int32_t fd;
     char *buf;
-} thread_data_t;
+} threadlet_state_t;
 
 void add_accept(struct io_uring *ring, int listen_fd) {
     // multishot?
@@ -78,7 +78,7 @@ void add_accept(struct io_uring *ring, int listen_fd) {
         errx(-1, "sq is full\n");
     }
     io_uring_prep_accept(sqe, listen_fd, NULL, NULL, 0);
-    thread_data_t *d = malloc(sizeof(thread_data_t));
+    threadlet_state_t *d = malloc(sizeof(threadlet_state_t));
     io_uring_sqe_set_data(sqe, d);
     d->fd = listen_fd;
     d->fn_id = ACCEPTER;
@@ -100,7 +100,7 @@ void* main_loop(void *args) {
 
     // When accepting a new connection, do some synchronous + blocking send+recv
     // operations. Allocate a new buf for that connection.
-    // When a recv completes, put that buf echo loop
+    // When a recv completes, use that buf for a send.
     for (;;) {
         io_uring_submit(&ring);
         struct io_uring_cqe *cqe;
@@ -109,7 +109,10 @@ void* main_loop(void *args) {
             fprintf(stderr, "io_uring_wait_cqe: %s\n", strerror(-e));
             exit(-1);
         }
-        thread_data_t *r = (thread_data_t*)cqe->user_data;
+        threadlet_state_t *r = (threadlet_state_t*)cqe->user_data;
+        if (r == NULL) { // threadlet_exit
+            continue;
+        }
         if (r->fn_id == ACCEPTER) {
             int conn_fd = cqe->res;
             if (conn_fd < 0) {
@@ -130,7 +133,7 @@ void* main_loop(void *args) {
             if (sqe == NULL) {
                 errx(-1, "sq is full\n");
             }
-            io_uring_prep_recv(sqe, conn_fd, header_buf, sizeof(header_bu), MSG_WAITALL);
+            io_uring_prep_recv(sqe, conn_fd, header_buf, sizeof(header_buf), MSG_WAITALL);
         } else if (r->opcode == RECV) {
             char *buf = NULL;
             if (cqe->res < 2) {

@@ -7,11 +7,11 @@
 #include <netinet/ip.h>
 #include <pthread.h>
 #include <semaphore.h>
+#include <err.h>
 #include "hiredis/hiredis.h"
 #include "dsem.h"
 
 #define BUF_SIZE 1024
-// #define DEBUG_ONE_OP
 
 void one_operation(int conn_fd, int msg_size) {
     static __thread uint64_t buf[BUF_SIZE/8] = {0};
@@ -26,39 +26,17 @@ void one_operation(int conn_fd, int msg_size) {
         *(uint64_t*)(&buf[i]) = rng_state;
     }
 
-    #ifdef DEBUG_ONE_OP
-    struct timespec start, end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    #endif
-
     ssize_t n = send(conn_fd, buf, msg_size, 0);
     // n = send(conn_fd, buf, msg_size/2, 0);
     // n = send(conn_fd, buf + msg_size/2, (msg_size/2), 0);
     if (n < msg_size/2) {
-        perror("send");
-        exit(-1);
+        err(-1, "send");
     }
-
-    #ifdef DEBUG_ONE_OP
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    if (rand() % 4096 == 0) {
-        printf("send %ld\n", (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec);
-    }
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    #endif
 
     n = recv(conn_fd, &buf, msg_size, MSG_WAITALL);
 
-    #ifdef DEBUG_ONE_OP
-    clock_gettime(CLOCK_MONOTONIC, &end);
-    if (rand() % 4096 == 0) {
-        printf("recv %ld\n", (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec);
-    }
-    #endif
-
     if (n < msg_size) {
-        perror("recv");
-        exit(-1);
+        err(-1, "recv");
     }
 }
 
@@ -89,9 +67,9 @@ void* start_client(void* args_in) {
     hints.ai_socktype = SOCK_STREAM;
 
     struct addrinfo *ai;
-    int err = getaddrinfo(params.address, params.port, &hints, &ai);
-    if (0 != err) {
-        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(err));
+    int e = getaddrinfo(params.address, params.port, &hints, &ai);
+    if (0 != e) {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(e));
         exit(-1);
     }
 
@@ -101,17 +79,17 @@ void* start_client(void* args_in) {
         // XXX: this only tries the first addrinfo in the linked list.
         conn_fd = socket(cur_ai->ai_family, cur_ai->ai_socktype, cur_ai->ai_protocol);
         if (0 > conn_fd) {
-            perror("socket");
-            exit(-1);
+            err(-1, "socket");
         }
 
         if (0 != connect(conn_fd, cur_ai->ai_addr, cur_ai->ai_addrlen)) {
-            perror("connect");
-            exit(-1);
+            fprintf(stderr, "address: %s, port: %s\n", params.address, params.port);
+            err(-1, "connect");
         }
     }
     freeaddrinfo(ai);
-    // At this point, conn_fd is ready to send/recv.
+    // XXX: At this point, conn_fd is ready to send; should only recv after the first
+    // send to avoid a half-connected socket caused by SYN cookies.
 
     if (conn_fd < 0) {
         perror("conn_fd negative");
@@ -119,29 +97,24 @@ void* start_client(void* args_in) {
 
     // Get clock resolution.
     struct timespec res;
-    err = clock_getres(CLOCK_MONOTONIC, &res);
-    if (err != 0) {
-        perror("clock_getres");
-        exit(-1);
+    e = clock_getres(CLOCK_MONOTONIC, &res);
+    if (e != 0) {
+        err(-1, "clock_getres");
     }
-    printf("Clock resolution %ld ns\n", res.tv_sec * 1000000000 + res.tv_nsec);
 
-    // get and print the message size
+    // send "Hi", a 2 byte value.
+    send(conn_fd, "Hi", 2, 0);
+
+    // get the message size
     int32_t msg_size;
     if (sizeof(msg_size) != recv(conn_fd, &msg_size, sizeof(msg_size), MSG_WAITALL)) {
-        perror("recv msg_size");
-        exit(-1);
+        err(-1, "recv msg_size");
     }
     msg_size = ntohl(msg_size);
-    printf("Message size: %d\n", msg_size);
 
     // Do one operation, then signal the thread that another thread has started.
-    // one_operation(conn_fd, msg_size);
+    one_operation(conn_fd, msg_size);
     sem_post(&started);
-    // FIXME: remove this
-    for (;;) {
-        nanosleep(&(struct timespec){.tv_sec = 10000, .tv_nsec = 0}, NULL);
-    }
 
     // Warm up by sending messages until notified that we should begin measuring.
     for (;;) {
@@ -152,10 +125,9 @@ void* start_client(void* args_in) {
     }
 
     struct timespec start, end;
-    err = clock_gettime(CLOCK_MONOTONIC, &start);
-    if (err != 0) {
-        perror("clock_gettime");
-        exit(-1);
+    e = clock_gettime(CLOCK_MONOTONIC, &start);
+    if (e != 0) {
+        err(-1, "clock_gettime");
     }
 
     args->num_ops = 0;
@@ -166,10 +138,9 @@ void* start_client(void* args_in) {
         one_operation(conn_fd, msg_size);
         args->num_ops += 1;
     }
-    err = clock_gettime(CLOCK_MONOTONIC, &end);
-    if (err != 0) {
-        perror("clock_gettime");
-        exit(-1);
+    e = clock_gettime(CLOCK_MONOTONIC, &end);
+    if (e != 0) {
+        err(-1, "clock_gettime");
     }
     args->runtime = (end.tv_sec - start.tv_sec)*1000000000 + end.tv_nsec - start.tv_nsec;
     sem_post(&reported);
@@ -186,18 +157,18 @@ static redisContext *redis_ctx;
 void load_bench_params() {
     redisReply *reply = redisCommand(redis_ctx, "MGET numthreads address port warmup_sec measure_sec");
     if (reply == NULL) {
-        printf("Error: %s\n", redis_ctx->errstr);
+        fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
         exit(-1);
     }
     if (reply->type != REDIS_REPLY_ARRAY) {
-        printf("Got unexpected reply type: %d\n", reply->type);
+        fprintf(stderr, "Got unexpected reply type: %d\n", reply->type);
         exit(-1);
     }
 
     // make sure the element[j]'s are strings
     for (int i = 0; i < 5; i++) {
         if (reply->element[i]->type != REDIS_REPLY_STRING) {
-            printf("ERROR: Got unexpected reply type: %d\n"
+            fprintf(stderr, "ERROR: Got unexpected reply type: %d\n"
                    "Make sure the redis instance is configured for this benchmark\n", reply->element[i]->type);
             exit(-1);
         }
@@ -211,23 +182,54 @@ void load_bench_params() {
     freeReplyObject(reply);
 }
 
+void try_claim_spot() {
+    redisReply *reply = redisCommand(redis_ctx, "DECR numclients");
+    if (reply == NULL) {
+        fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
+        exit(-1);
+    }
+    if (reply->type != REDIS_REPLY_INTEGER) {
+        fprintf(stderr, "Got unexpected reply type (instead of int): %d\n", reply->type);
+        exit(-1);
+    }
+    if (reply->integer < 0) {
+        fprintf(stderr, "Enough client processes already running, exiting.\n");
+        exit(-1);
+    }
+}
+
 void put_report(uint64_t num_ops, uint64_t runtime) {
-    puts("impl");
-    exit(-1);
+    char *cmd;
+    int ret = asprintf(&cmd, "APPEND results \" (%ld,%ld)\"", num_ops, runtime);
+    if (ret < 0) {
+        err(-1, "asprintf");
+    }
+    redisReply *reply = redisCommand(redis_ctx, cmd);
+    if (reply == NULL) {
+        fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
+        exit(-1);
+    }
+    if (reply->type != REDIS_REPLY_INTEGER) {
+        fprintf(stderr, "Got unexpected reply type (instead of int): %d\n", reply->type);
+        exit(-1);
+    }
+    free(cmd);
+    freeReplyObject(reply);
 }
 
 void bench(const char* redis_addr) {
     redis_ctx = redisConnect(redis_addr, 6379);
     if (redis_ctx == NULL || redis_ctx->err) {
         if (redis_ctx) {
-            printf("Error: %s\n", redis_ctx->errstr);
+            fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
             // handle error
         } else {
-            printf("Can't allocate redis context\n");
+            fprintf(stderr, "Can't allocate redis context\n");
         }
         puts("here");
         exit(-1);
     }
+    try_claim_spot();
     load_bench_params();
 
     sem_init(&started, 0, 0);
@@ -282,7 +284,7 @@ void bench(const char* redis_addr) {
     put_report(num_ops, runtime);
     dsem_post(redis_ctx, "reported", 1);
 
-    printf("%ld ops/sec across %d threads", (num_ops * 1000000000 / runtime), params.N);
+    fprintf(stderr, "%ld ops/sec across %d threads", (num_ops * 1000000000 / runtime), params.N);
 
     // The spawned threads have a pointer to sem_t's on this thread's stack, so
     // should never return from this function so long as those threads are running.
