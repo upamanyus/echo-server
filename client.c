@@ -33,7 +33,7 @@ void one_operation(int conn_fd, int msg_size) {
     ssize_t n = send(conn_fd, buf, msg_size, 0);
     // n = send(conn_fd, buf, msg_size/2, 0);
     // n = send(conn_fd, buf + msg_size/2, (msg_size/2), 0);
-    if (n < msg_size/2) {
+    if (n < msg_size) {
         perror("send");
         exit(-1);
     }

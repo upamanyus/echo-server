@@ -9,7 +9,7 @@
 #include <semaphore.h>
 #include <err.h>
 #include "hiredis/hiredis.h"
-#include "dsem.h"
+#include "dsync.h"
 
 #define BUF_SIZE 1024
 
@@ -29,7 +29,7 @@ void one_operation(int conn_fd, int msg_size) {
     ssize_t n = send(conn_fd, buf, msg_size, 0);
     // n = send(conn_fd, buf, msg_size/2, 0);
     // n = send(conn_fd, buf + msg_size/2, (msg_size/2), 0);
-    if (n < msg_size/2) {
+    if (n < msg_size) {
         err(-1, "send");
     }
 
@@ -44,8 +44,6 @@ typedef struct {
     int N;
     const char* address;
     const char* port;
-    int warmup_sec;
-    int measure_sec;
 } bench_params_t;
 static bench_params_t params;
 
@@ -155,7 +153,7 @@ void* start_client(void* args_in) {
 static redisContext *redis_ctx;
 
 void load_bench_params() {
-    redisReply *reply = redisCommand(redis_ctx, "MGET numthreads address port warmup_sec measure_sec");
+    redisReply *reply = redisCommand(redis_ctx, "MGET numthreads address port");
     if (reply == NULL) {
         fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
         exit(-1);
@@ -166,7 +164,7 @@ void load_bench_params() {
     }
 
     // make sure the element[j]'s are strings
-    for (int i = 0; i < 5; i++) {
+    for (int i = 0; i < 3; i++) {
         if (reply->element[i]->type != REDIS_REPLY_STRING) {
             fprintf(stderr, "ERROR: Got unexpected reply type: %d\n"
                    "Make sure the redis instance is configured for this benchmark\n", reply->element[i]->type);
@@ -176,8 +174,6 @@ void load_bench_params() {
     params.N = atoi(reply->element[0]->str);
     params.address = strdup(reply->element[1]->str);
     params.port = strdup(reply->element[2]->str);
-    params.warmup_sec = atoi(reply->element[3]->str);
-    params.measure_sec = atoi(reply->element[4]->str);
 
     freeReplyObject(reply);
 }
@@ -198,22 +194,23 @@ void try_claim_spot() {
     }
 }
 
-void put_report(uint64_t num_ops, uint64_t runtime) {
-    char *cmd;
-    int ret = asprintf(&cmd, "APPEND results \" (%ld,%ld)\"", num_ops, runtime);
+void put_report(uint64_t throughput) {
+    char *data;
+    int ret = asprintf(&data, " %ld", throughput);
     if (ret < 0) {
         err(-1, "asprintf");
     }
-    redisReply *reply = redisCommand(redis_ctx, cmd);
+    redisReply *reply = redisCommand(redis_ctx, "APPEND results %s", data);
     if (reply == NULL) {
         fprintf(stderr, "Error: %s\n", redis_ctx->errstr);
         exit(-1);
     }
     if (reply->type != REDIS_REPLY_INTEGER) {
         fprintf(stderr, "Got unexpected reply type (instead of int): %d\n", reply->type);
+        fprintf(stderr, "Reply error: %s\n", reply->str);
         exit(-1);
     }
-    free(cmd);
+    free(data);
     freeReplyObject(reply);
 }
 
@@ -252,10 +249,10 @@ void bench(const char* redis_addr) {
     }
 
     puts("all threads started");
-    dsem_post(redis_ctx, "started", 1);
+    dcounter_incr(redis_ctx, "started", 1);
 
     // After hearing "should_measure", tell the N threads to start measuring.
-    dsem_wait(redis_ctx, "should_measure", 1);
+    dflag_wait(redis_ctx, "should_measure");
     for (int i = 0; i < params.N; i++) {
         sem_post(&should_measure);
     }
@@ -263,28 +260,32 @@ void bench(const char* redis_addr) {
     puts("measuring");
 
     // After hearing "should_report", tell the N threads to report in.
-    dsem_wait(redis_ctx, "should_report", 1);
+    dflag_wait(redis_ctx, "should_report");
     for (int i = 0; i < params.N; i++) {
         sem_post(&should_report);
     }
 
+    puts("collecting reports from threads");
     // Wait for N threads to report.
     for (int i = 0; i < params.N; i++) {
         sem_wait(&reported);
     }
 
-    uint64_t num_ops = 0, runtime = 0;
     // now aggregate the measurements
+    uint64_t num_ops = 0;
+    uint64_t throughput = 0;
     for (int i = 0; i < params.N; i++) {
         num_ops += args[i].num_ops;
-        runtime += args[i].runtime;
+        throughput += ((args[i].num_ops*1000000000) + (args[i].runtime/2)) / args[i].runtime;
     }
 
     // Send report upstairs.
-    put_report(num_ops, runtime);
-    dsem_post(redis_ctx, "reported", 1);
+    put_report(throughput);
+    dcounter_incr(redis_ctx, "reported", 1);
+    puts("sent report");
 
-    fprintf(stderr, "%ld ops/sec across %d threads", (num_ops * 1000000000 / runtime), params.N);
+    printf("%ld total ops\n", num_ops);
+    printf("%ld ops/sec across %d threads\n", throughput, params.N);
 
     // The spawned threads have a pointer to sem_t's on this thread's stack, so
     // should never return from this function so long as those threads are running.
@@ -292,6 +293,7 @@ void bench(const char* redis_addr) {
 }
 
 int main(int argc, char **argv) {
+    stderr = stdout;
     if (argc < 2) {
         puts("must provide redis host as first argument");
         exit(-1);
