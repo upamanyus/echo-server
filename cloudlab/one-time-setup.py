@@ -3,9 +3,9 @@
 import os
 from os import system as do
 
-do("sudo apt update")
-do("sudo apt upgrade")
-do("sudo apt install cpufrequtils liburing-dev")
+do("yes | sudo apt update")
+do("yes | sudo apt upgrade")
+do("yes | sudo apt install cpufrequtils liburing-dev")
 os.chdir("/tmp")
 do("wget https://go.dev/dl/go1.21.0.linux-amd64.tar.gz -O go.tar.gz")
 do("sudo tar -C /usr/local -xzvf go.tar.gz")

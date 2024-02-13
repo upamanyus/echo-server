@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+# Set up SSH keys to ssh between nodes
+/usr/bin/geni-get key > ~/.ssh/id_rsa
+chmod 600 ~/.ssh/id_rsa
+ssh-keygen -y -f ~/.ssh/id_rsa > ~/.ssh/id_rsa.pub
+cat ~/.ssh/id_rsa.pub >> ~/.ssh/authorized_keys
+chmod 644 ~/.ssh/authorized_keys
+
+export PATH=$PATH:/usr/local/go/bin
+
+# set shell:
+sudo chsh -s /bin/zsh $(whoami)
+
+# turn off hyperthreading
+echo off | sudo tee /sys/devices/system/cpu/smt/control
+
+# set intel_pstate driver to use performance governor; note that this is not the
+# same as actually setting the CPU frequency to a fixed amount, which does not
+# seem easily doable on cloudlab.
+echo performance | sudo tee /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor
+
+# install numactl
+sudo apt update
+yes | sudo apt install numactl

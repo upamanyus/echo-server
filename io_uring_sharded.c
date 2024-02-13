@@ -18,15 +18,6 @@ typedef struct {
     int listen_fd;
 } thread_args_t;
 
-void set_nonblocking(int fd) {
-    if (fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) == -1) {
-        errx(-1, "Unable to set fd to nonblocking");
-    }
-    if ((fcntl(fd, F_GETFL) & O_NONBLOCK) == 0) {
-        errx(-1, "fd not set to nonblocking");
-    }
-}
-
 void handle_new_conn(int conn_fd) {
     char buf[BUF_SIZE];
     // TODO: do this in the "accept" case
@@ -96,9 +87,6 @@ void* main_loop(void *args) {
     int32_t msg_size_conv = htonl(msg_size);
     char header_buf[2];
 
-    // When accepting a new connection, do some synchronous + blocking send+recv
-    // operations. Allocate a new buf for that connection.
-    // When a recv completes, use that buf for a send.
     for (;;) {
         io_uring_submit(&ring);
 
@@ -230,7 +218,6 @@ void *start_server(void* a) {
         exit(-1);
     }
     puts("listening");
-    // set_nonblocking(listen_fd);
 
     // accept connections and spawn threads to handle them
     thread_args_t *arg = malloc(sizeof(thread_args_t));

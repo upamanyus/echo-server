@@ -46,13 +46,12 @@ func client(args *clientArgs) {
 	}
 	buf := make([]byte, 1024)
 
-	// XXX: no check for failure here
 	n, err := conn.Write([]byte("Hi"))
 	if err != nil || n < 2 {
 		panic(err)
 	}
 
-	n, err = conn.Read(buf[0:8])
+	n, err = conn.Read(buf[0:4])
 	if err != nil || n < 4 {
 		panic(err)
 	}

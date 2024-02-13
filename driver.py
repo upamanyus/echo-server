@@ -11,7 +11,7 @@ def start_redis(addr):
     cl.connect(addr)
     stdin, stdout, stderr = cl.exec_command("killall redis-server")
     stdout.channel.recv_exit_status()
-    stdin, stdout, stderr = cl.exec_command('nohup redis-server --save "" --appendonly no &')
+    stdin, stdout, stderr = cl.exec_command('nohup redis-server --save "" --appendonly no  --protected-mode no &')
     stdout.channel.recv_exit_status()
 
 def kill_client(addr):
@@ -81,7 +81,7 @@ def main():
 
     write_benchmark_params_to_redis(redis_address, p)
 
-    start_clients(client_addresses, "~/research/grove/echo-server/bin/multiclient", redis_address)
+    start_clients(client_addresses, "~/echo-server/bin/multiclient", redis_address)
 
     r = redis.Redis(host=redis_address, decode_responses=True)
     print("waiting for all clients to start")
