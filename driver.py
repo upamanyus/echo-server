@@ -40,7 +40,7 @@ def write_benchmark_params_to_redis(redis_address, params):
     r.set("address", str(params.server_address))
     r.set("port", str(params.server_port))
 
-    # initialize semaphores
+    # initialize counters/flags
     r.set("should_measure", 0)
     r.set("should_report", 0)
     r.set("reported", 0)
