@@ -46,8 +46,8 @@ typedef struct {
     __u64 buffer_address;
     __u16 length;
     __u16 checksum;
-    __u16 status;
-    __u16 errors;
+    __u8 status;
+    __u8 errors;
     __u16 vlan_tag;
 } rq_desc_t;
 

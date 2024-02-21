@@ -88,7 +88,7 @@ void init_vfio() {
         exit(-1);
     }
 
-    group = open("/dev/vfio/49", O_RDWR);
+    group = open("/dev/vfio/50", O_RDWR);
     struct vfio_group_status group_status;
     group_status.argsz = sizeof(group_status);
     ioctl(group, VFIO_GROUP_GET_STATUS, &group_status);
@@ -102,7 +102,7 @@ void init_vfio() {
     ioctl(container, VFIO_SET_IOMMU, VFIO_TYPE1_IOMMU);
 
     // FIXME: get PCI ID
-    device = ioctl(group, VFIO_GROUP_GET_DEVICE_FD, "0000:06:00.0");
+    device = ioctl(group, VFIO_GROUP_GET_DEVICE_FD, "0000:06:00.1");
 
     struct vfio_device_info device_info = { .argsz = sizeof(device_info) };
     ioctl(device, VFIO_DEVICE_GET_INFO, &device_info);
@@ -256,17 +256,17 @@ void init_i10e() {
 
     puts("Done with reset");
 
-    // FIXME: should hold SWSM semaphore while accessing this to prevent races
-    // with firmware. Being lazy and not doing it now and hoping for the best.
+    // FIXME: for enabling loopback, should hold SWSM semaphore while accessing this to prevent races
+    // with firmware.
     // [14.1] AUTOC
     // AUTOC.LMS = 0x1 for 10GbE
     // AUTOC.FLU = 1 to force link up
     // HLREG0.LPBK = 1
     // bar0_write(AUTOC, (0b001 << 13) | 1);
-    bar0_write(HLREG0, bar0_read(HLREG0) | /*  (1 << 15) |*/ 1 | (1 << 1) | (1 << 10)); // LPBK
+    // bar0_write(HLREG0, (1 << 15) | ....
+    bar0_write(HLREG0, bar0_read(HLREG0) | 1 | (1 << 1) | (1 << 10)); // LPBK
     bar0_write(RDRXCTL, bar0_read(RDRXCTL) | 1);
     bar0_write(CTRL_EXT, 1 << 16); // Set NS_DIS, required at least for legacy descriptors.
-    puts("Enabled link loopback");
 
     link_status = bar0_read(LINKS);
     printf("Link status: %s, Link speed: %s\n", link_status & (1 << 30) ? "on" : "off",
@@ -287,9 +287,9 @@ void init_i10e() {
     for (int i = 0; i < RQ_LEN; i++) {
         rq_desc_t *rqe = (rq_desc_t*)(rq_addr + i*sizeof(rq_desc_t));
         memset(rqe, 0, sizeof(rq_desc_t));
-        rqe->buffer_address = dma_alloc_aligned(2048, 7);
+        rqe->buffer_address = vaddr_to_iovaddr(dma_alloc_aligned(2048, 7));
     }
-    __u64 rq_iova = vaddr_to_iovaddr(tq_addr);
+    __u64 rq_iova = vaddr_to_iovaddr(rq_addr);
     bar0_write(RDBAL(qnum), u64_low(rq_iova));
     bar0_write(RDBAH(qnum), u64_high(rq_iova));
     if (RQ_LEN * sizeof(rq_desc_t) % 128 != 0) {
@@ -302,16 +302,14 @@ void init_i10e() {
     bar0_write(SRRCTL(qnum), 0x2);
     printf("RX DMA status: %s\n", (bar0_read(RDRXCTL) & (1 << 3)) ? "ready" : "not ready");
     bar0_write(RXDCTL(qnum), 1 << 25); // Enable RX queue.
-    __u32 iters = 0;
     while ((bar0_read(RXDCTL(qnum)) & (1 << 25)) == 0) {
-        iters++;
     } // wait for queue to actually be enabled
-    printf("receive queue enabled after %d iters\n", iters);
     bar0_write(RDT(qnum), RQ_LEN-1);
 
     bar0_write(RXCTRL, 1); // Enable RX.
+    while ((bar0_read(RXCTRL) & 1) == 0) {
+    } // wait for RX to actually be enabled
     puts("RX enabled");
-
 
     // allocate TX ring
     tq_addr = dma_alloc_aligned(sizeof(tq_desc_t) * TQ_LEN, 7);
@@ -350,24 +348,37 @@ void send_one() {
     fill_with_bytes((void*)buffer_address, 128);
 
     printf("%llx %llx\n", *(__u64*)tqe, *((__u64*)tqe + 1));
-    __sync_synchronize();
     bar0_write(TDT(qnum), 1);
-    __sync_synchronize();
 
     // wait for ownership to return to software
     while ((tqe->sta_and_rsvd & 1) == 0) {
         printf("TDH, TDT: %d, %d\n", bar0_read(TDH(qnum)), bar0_read(TDT(qnum)));
-        // printf("RDH, RDT: %d, %d\n", bar0_read(RDH(qnum)), bar0_read(RDT(qnum)));
+        printf("RDH, RDT: %d, %d\n", bar0_read(RDH(qnum)), bar0_read(RDT(qnum)));
         printf("0x%llx 0x%llx\n", *(__u64*)tqe, *((__u64*)tqe + 1));
-        nanosleep(&(struct timespec){.tv_sec = 1, .tv_nsec = 0000000}, NULL); // sleep at least 1 ms, here doing 3ms.
+        nanosleep(&(struct timespec){.tv_sec = 1, .tv_nsec = 0000000}, NULL);
     }
 
     puts("Transmit complete\n");
+    printf("TDH, TDT: %d, %d\n", bar0_read(TDH(qnum)), bar0_read(TDT(qnum)));
+    printf("RDH, RDT: %d, %d\n", bar0_read(RDH(qnum)), bar0_read(RDT(qnum)));
+    nanosleep(&(struct timespec){.tv_sec = 2, .tv_nsec = 0000000}, NULL);
+    printf("RDH, RDT: %d, %d\n", bar0_read(RDH(qnum)), bar0_read(RDT(qnum)));
+}
+
+void rq_poll_once() {
+    __u32 qnum = 0;
+    __u32 first_unreceived = bar0_read(RDH(qnum));
+    __u32 first_prepared = (bar0_read(RDT(qnum)) + 1) % RQ_LEN;
+    for (__u32 i = first_prepared; i < first_unreceived; i = (i + 1) % RQ_LEN) {
+        rq_desc_t *rqe = &((rq_desc_t*)rq_addr)[i];
+        printf("Received 0x%hx bytes at 0x%llx, status 0x%x\n", rqe->length, iovaddr_to_vaddr(rqe->buffer_address), rqe->status);
+    }
 }
 
 int main() {
     init_vfio();
     init_i10e();
     send_one();
+    rq_poll_once();
     return 0;
 }
