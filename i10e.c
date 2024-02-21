@@ -8,7 +8,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <arpa/inet.h>
 #include "i10e.h"
+#include "net.h"
 
 static char* bar0_base;
 static volatile char* dma_region;
@@ -372,6 +374,8 @@ void rq_poll_once() {
     for (__u32 i = first_prepared; i < first_unreceived; i = (i + 1) % RQ_LEN) {
         rq_desc_t *rqe = &((rq_desc_t*)rq_addr)[i];
         printf("Received 0x%hx bytes at 0x%llx, status 0x%x\n", rqe->length, iovaddr_to_vaddr(rqe->buffer_address), rqe->status);
+        ethernet_header_t* h = (ethernet_header_t*)iovaddr_to_vaddr(rqe->buffer_address);
+        printf("Ethernet length: 0x%x\n", ntohs(h->length));
     }
 }
 
