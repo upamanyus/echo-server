@@ -52,7 +52,7 @@ def start_clients(client_addresses, path_to_client, redis_address):
 
     for addr in client_addresses:
         start_client(addr, path_to_client, redis_address)
-        print("started another")
+        print("started a client")
 
 def dcounter_wait(r, counter_name, n):
     while True:
@@ -63,19 +63,23 @@ def dcounter_wait(r, counter_name, n):
 def dflag_set(r, flag_name):
     r.set(flag_name, "1")
 
+def get_throughput(r):
+    return sum([int(x) for x in r.get("results").split()])
+
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: ./driver.py <redis_address> <server_address> [<client_address> ...]")
+    if len(sys.argv) < 4:
+        print("Usage: ./driver.py <redis_address> <server_address> <num_threads> [<client_address> ...]")
         exit(-1)
 
     redis_address = sys.argv[1]
-    client_addresses = sys.argv[3:]
+    num_threads = sys.argv[3]
+    client_addresses = sys.argv[4:]
     start_redis(redis_address)
     time.sleep(1.5) # XXX: wait for redis to have started
 
     p = BenchmarkParams()
     p.num_clients = len(client_addresses)
-    p.num_threads = 2
+    p.num_threads = num_threads
     p.server_address = sys.argv[2]
     p.server_port = 12345
 
@@ -95,6 +99,7 @@ def main():
     print("collecting reports")
     dcounter_wait(r, "reported", p.num_clients)
     print("done")
+    print(f"overall throughput: {get_throughput(r)}")
 
 if __name__=="__main__":
     main()
